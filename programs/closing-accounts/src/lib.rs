@@ -22,36 +22,24 @@ pub mod closing_accounts {
         Ok(())
     }
 
-    pub fn redeem_winnings_insecure(ctx: Context<RedeemWinnings>) -> Result<()> {
+    pub fn redeem_winnings_secure(ctx: Context<RedeemWinnings>) -> Result<()> {
+        let lottery_entry = &ctx.accounts.lottery_entry;
 
-        msg!("Calculating winnings");
-        let amount = ctx.accounts.lottery_entry.timestamp as u64 * 10;
+        let current_time = Clock::get()?.unix_timestamp;
+        require!(
+            current_time - lottery_entry.timestamp > 60,
+            MyError::TooEarlyToRedeem
+        );
 
-        msg!("Minting {} tokens in rewards", amount);
-         // program signer seeds
-        let auth_bump = *ctx.bumps.get("mint_auth").unwrap();
-        let auth_seeds = &[MINT_SEED.as_bytes(), &[auth_bump]];
-        let signer = &[&auth_seeds[..]];
+        let amount = 100;
 
-        // donate RND by minting to vault
+        msg!("Minting {} tokens to user", amount);
+
+        let bump = *ctx.bumps.get("mint_auth").unwrap();
+        let signer_seeds = &[MINT_SEED.as_bytes(), &[bump]];
+        let signer = &[&signer_seeds[..]];
+
         mint_to(ctx.accounts.mint_ctx().with_signer(signer), amount)?;
-
-        msg!("Closing account...");
-        let account_to_close = ctx.accounts.lottery_entry.to_account_info();
-        let dest_starting_lamports = ctx.accounts.user.lamports();
-
-        **ctx.accounts.user.lamports.borrow_mut() = dest_starting_lamports
-            .checked_add(account_to_close.lamports())
-            .unwrap();
-        **account_to_close.lamports.borrow_mut() = 0;
-
-        let mut data = account_to_close.try_borrow_mut_data()?;
-        for byte in data.deref_mut().iter_mut() {
-            *byte = 0;
-        }
-
-        msg!("Lottery lamports: {:?}", account_to_close.lamports);
-        msg!("Lottery account closed");
 
         Ok(())
     }
@@ -97,33 +85,38 @@ pub struct EnterLottery<'info> {
 
 #[derive(Accounts)]
 pub struct RedeemWinnings<'info> {
-    // program expects this account to be initialized
     #[account(
         mut,
         seeds = [DATA_PDA_SEED.as_bytes(), user.key().as_ref()],
         bump = lottery_entry.bump,
-        has_one = user
+        has_one = user,
+        close = user
     )]
     pub lottery_entry: Account<'info, LotteryAccount>,
+
     #[account(mut)]
     pub user: Signer<'info>,
+
     #[account(
         mut,
         constraint = user_ata.key() == lottery_entry.user_ata
     )]
     pub user_ata: Account<'info, TokenAccount>,
+
     #[account(
         mut,
         constraint = reward_mint.key() == user_ata.mint
     )]
     pub reward_mint: Account<'info, Mint>,
-    ///CHECK: mint authority
+
+    /// CHECK: this is the mint authority PDA
     #[account(
         seeds = [MINT_SEED.as_bytes()],
         bump
     )]
     pub mint_auth: AccountInfo<'info>,
-    pub token_program: Program<'info, Token>
+
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
@@ -148,7 +141,7 @@ pub struct LotteryAccount {
 pub const DATA_PDA_SEED: &str = "test-seed";
 pub const MINT_SEED: &str = "mint-seed";
 
-impl<'info> RedeemWinnings <'info> {
+impl<'info> RedeemWinnings<'info> {
     pub fn mint_ctx(&self) -> CpiContext<'_, '_, '_, 'info, MintTo<'info>> {
         let cpi_program = self.token_program.to_account_info();
         let cpi_accounts = MintTo {
@@ -164,5 +157,7 @@ impl<'info> RedeemWinnings <'info> {
 #[error_code]
 pub enum MyError {
     #[msg("Expected closed account discriminator")]
-    InvalidDiscriminator
+    InvalidDiscriminator,
+    #[msg("Too early to redeem winnings")]
+    TooEarlyToRedeem,
 }
